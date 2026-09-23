@@ -38,7 +38,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { MonzoImport } from "@/components/monzo-import";
+import { PageTitle } from "@/components/page-title";
+import { SECTION_LABELS, useSection } from "@/components/section-nav";
+import { Stat1 } from "@/components/stat-1";
+import { Stat2 } from "@/components/stat-2";
+import { DERIVED_PREFIX, deriveDashboard } from "@/lib/monzo/derive";
+import type { ImportReport, Rule, Txn } from "@/lib/monzo/types";
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -70,6 +76,12 @@ type Data = {
   settings: { taxRate: number };
   checklist: { week: string; done: string[] };
   completedWeeks: string[];
+  /** Imported Monzo statement rows */
+  transactions: Txn[];
+  /** Payee overrides set on the Statements tab */
+  rules: Rule[];
+  /** One report per imported file */
+  imports: ImportReport[];
 };
 
 const INCOME_KINDS = ["Employed (take-home)", "Self-employed (before tax)", "Other"];
@@ -187,6 +199,9 @@ function sampleData(): Data {
     settings: { taxRate: 25 },
     checklist: { week: weekKey(), done: [] },
     completedWeeks: [],
+    transactions: [],
+    rules: [],
+    imports: [],
   };
 }
 
@@ -204,6 +219,43 @@ function emptyData(): Data {
     settings: { taxRate: 25 },
     checklist: { week: weekKey(), done: [] },
     completedWeeks: [],
+    transactions: [],
+    rules: [],
+    imports: [],
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Monzo: fold statement-derived rows into the dashboard               */
+/* ------------------------------------------------------------------ */
+
+/** Replace previously derived rows, keep manual rows, and keep any flags the user changed on derived rows. */
+function mergeDerived<T extends { id: string }>(existing: T[], derived: T[], keep: (keyof T)[]): T[] {
+  const manual = existing.filter((r) => !r.id.startsWith(DERIVED_PREFIX));
+  const prev = new Map(existing.map((r) => [r.id, r]));
+  return [
+    ...manual,
+    ...derived.map((r) => {
+      const p = prev.get(r.id);
+      if (!p) return r;
+      const merged = { ...r };
+      keep.forEach((k) => {
+        merged[k] = p[k];
+      });
+      return merged;
+    }),
+  ];
+}
+
+function applyDerived(d: Data): Data {
+  const der = deriveDashboard(d.transactions, d.rules);
+  return {
+    ...d,
+    income: mergeDerived<Income>(d.income, der.income, ["kind"]),
+    expenses: mergeDerived<Expense>(d.expenses, der.expenses, ["essential"]),
+    subscriptions: mergeDerived<Subscription>(d.subscriptions, der.subscriptions, ["worthIt"]),
+    fees: mergeDerived<Fee>(d.fees, der.fees, ["avoidable"]),
+    accounts: mergeDerived<Account>(d.accounts, der.accounts, ["type"]),
   };
 }
 
@@ -443,33 +495,50 @@ const tooltipStyle = {
 export default function Page() {
   const [data, setData] = useState<Data>(emptyData);
   const [loaded, setLoaded] = useState(false);
+  const [saveError, setSaveError] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // Load once on the client
   useEffect(() => {
+    // Hydrates dashboard state from this browser's storage. The setState is the point of the effect.
+    /* eslint-disable react-hooks/set-state-in-effect */
     let next: Data;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       next = raw ? { ...emptyData(), ...JSON.parse(raw) } : sampleData();
+      next.transactions ??= [];
+      next.rules ??= [];
+      next.imports ??= [];
     } catch {
       next = sampleData();
     }
     if (next.checklist.week !== weekKey()) next.checklist = { week: weekKey(), done: [] };
     setData(next);
     setLoaded(true);
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
   // Save on every change
   useEffect(() => {
     if (!loaded) return;
+    /* eslint-disable react-hooks/set-state-in-effect */
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      setSaveError(false);
     } catch {
-      /* storage full or blocked: data stays in memory for this session */
+      // Storage full or blocked: data stays in memory for this session
+      setSaveError(true);
     }
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [data, loaded]);
 
   const patch = <K extends keyof Data>(key: K, value: Data[K]) => setData((d) => ({ ...d, [key]: value }));
+
+  // Statement changes rebuild the Monzo rows on every tab in one update
+  const patchMonzo = (next: Partial<Pick<Data, "transactions" | "rules" | "imports">>) =>
+    setData((d) => applyDerived({ ...d, ...next }));
+
+  const derived = useMemo(() => deriveDashboard(data.transactions, data.rules), [data.transactions, data.rules]);
 
   /* ------------------------------ Numbers ------------------------------ */
 
@@ -595,6 +664,8 @@ export default function Page() {
     if (confirm("Clear everything and start with an empty dashboard? Export first if you want a backup.")) setData(emptyData());
   };
 
+  const { section } = useSection();
+
   if (!loaded) return <div className="p-8 text-muted-foreground">Loading your figures…</div>;
 
   const weeksShown = lastNWeeks(8);
@@ -603,12 +674,46 @@ export default function Page() {
 
   /* ------------------------------ Render ------------------------------ */
 
+  const fileActions = (
+    <div className="flex flex-wrap gap-2">
+      <Button variant="outline" size="sm" onClick={exportJson}>
+        <Download className="size-4" /> Export
+      </Button>
+      <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()}>
+        <Upload className="size-4" /> Import
+      </Button>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="application/json"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) importJson(f);
+          e.target.value = "";
+        }}
+      />
+      <Button variant="outline" size="sm" onClick={clearAll}>
+        <RotateCcw className="size-4" /> Clear all
+      </Button>
+    </div>
+  );
+
   return (
-    <main className="mx-auto max-w-7xl space-y-6 p-4 md:p-8">
-      <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-        <div className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Money at a glance</h1>
-          <p className="max-w-prose text-muted-foreground">
+    <div className="space-y-4 sm:space-y-5">
+      <PageTitle title={SECTION_LABELS[section]} endContent={fileActions} />
+
+      {saveError && (
+        <p className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">
+          This browser&apos;s storage is full, so changes won&apos;t survive a refresh. Export a backup now, then remove old imports on
+          the Statements tab.
+        </p>
+      )}
+
+        {/* ============================ OVERVIEW ============================ */}
+        {section === "overview" && (
+        <div className="space-y-4 sm:space-y-5">
+          <p className="max-w-prose text-sm text-muted-foreground">
             {m.leftOver >= 0 ? (
               <>
                 After every bill, subscription and debt payment you keep{" "}
@@ -616,72 +721,81 @@ export default function Page() {
               </>
             ) : (
               <>
-                You're <span className="font-medium text-destructive">{gbp(-m.leftOver)}</span> short each month. Start
-                on the Cash flow tab.
+                You&apos;re <span className="font-medium text-destructive">{gbp(-m.leftOver)}</span> short each month. Open
+                Cash flow in the sidebar.
               </>
             )}
           </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={exportJson}>
-            <Download className="size-4" /> Export
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()}>
-            <Upload className="size-4" /> Import
-          </Button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="application/json"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) importJson(f);
-              e.target.value = "";
-            }}
-          />
-          <Button variant="outline" size="sm" onClick={clearAll}>
-            <RotateCcw className="size-4" /> Clear all
-          </Button>
-        </div>
-      </header>
-
-      <Tabs defaultValue="overview" className="space-y-4">
-        <TabsList className="flex h-auto w-full flex-wrap justify-start">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="cashflow">Cash flow</TabsTrigger>
-          <TabsTrigger value="balances">Balances</TabsTrigger>
-          <TabsTrigger value="goals">Goals</TabsTrigger>
-          <TabsTrigger value="routine">Routine</TabsTrigger>
-        </TabsList>
-
-        {/* ============================ OVERVIEW ============================ */}
-        <TabsContent value="overview" className="space-y-4">
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <Stat label="Net worth" value={gbp(m.netWorth)} hint={`${gbp(m.assets)} assets, ${gbp(m.debts)} debts`} tone={m.netWorth < 0 ? "bad" : undefined} />
-            <Stat label="Income / month" value={gbp(m.incomeNet)} hint={m.seGross ? `After ${gbp(m.taxSetAside)} tax set-aside` : "Take-home"} />
-            <Stat label="Outgoings / month" value={gbp(m.outgoings)} hint={`${gbp(m.essential)} essential`} />
-            <Stat
-              label="Savings rate"
-              value={pct(m.savingsRate)}
-              hint={`${gbp(m.leftOver)} left over`}
-              tone={m.savingsRate < 0 ? "bad" : m.savingsRate >= 20 ? "good" : undefined}
+          <div className="grid gap-4 sm:gap-5 xl:grid-cols-4">
+            <Stat2
+              title="Net worth"
+              value={gbp(m.netWorth)}
+              trendValue={m.netWorth < 0 ? -1 : 1}
+              trendLabel={m.netWorth < 0 ? "Negative" : "Positive"}
+              footerLabel={`${gbp(m.assets)} in assets`}
+              footerSubtext={`${gbp(m.debts)} in debts`}
             />
-            <Stat label="Total debt" value={gbp(m.debts)} hint={`${gbp(m.debtMin)}/mo minimums, ${pct(m.debtToIncome)} of income`} />
-            <Stat label="Investments" value={gbp(m.investTotal)} hint={`${gbp(m.investTotal - m.investContrib)} growth on ${gbp(m.investContrib)} paid in`} />
-            <Stat label="Subscriptions" value={`${gbp(m.subs)}/mo`} hint={`${gbp(m.subs * 12)} a year`} />
-            <Stat label="Fees & commissions" value={`${gbp(m.feesMonthly * 12)}/yr`} hint={`Incl. ${gbp(m.investFeesYear)} investment fees`} />
+            <Stat2
+              title="Income / month"
+              value={gbp(m.incomeNet)}
+              trendValue={m.incomeNet > 0 ? 1 : 0}
+              trendLabel={m.seGross ? "After tax" : "Take-home"}
+              footerLabel={m.seGross ? `${gbp(m.taxSetAside)} set aside` : "No self-employed income"}
+              footerSubtext="Employed pay is entered as take-home"
+            />
+            <Stat2
+              title="Outgoings / month"
+              value={gbp(m.outgoings)}
+              trendValue={m.leftOver < 0 ? -1 : 1}
+              trendLabel={m.leftOver < 0 ? "Over budget" : "Covered"}
+              footerLabel={`${gbp(m.essential)} essential`}
+              footerSubtext="Bills, subscriptions, fees and debt payments"
+            />
+            <Stat2
+              title="Savings rate"
+              value={pct(m.savingsRate)}
+              trendValue={m.savingsRate < 0 ? -1 : m.savingsRate >= 20 ? 1 : 0}
+              trendLabel={m.savingsRate < 0 ? "Shortfall" : m.savingsRate >= 20 ? "Strong" : "Building"}
+              footerLabel={`${gbp(m.leftOver)} left over`}
+              footerSubtext="Money left after outgoings, divided by income"
+            />
+          </div>
+          <div className="grid gap-4 sm:gap-5 md:grid-cols-2 xl:grid-cols-4">
+            <Stat1
+              title="Total debt"
+              value={gbp(m.debts)}
+              changeValue={`${gbp(m.debtMin)}/mo minimums`}
+              direction={m.debts > 0 ? "down" : "neutral"}
+            />
+            <Stat1
+              title="Investments"
+              value={gbp(m.investTotal)}
+              changeValue={`${gbp(m.investTotal - m.investContrib)} growth`}
+              direction={m.investTotal - m.investContrib < 0 ? "down" : "up"}
+            />
+            <Stat1
+              title="Subscriptions"
+              value={`${gbp(m.subs)}/mo`}
+              changeValue={`${gbp(m.subs * 12)} a year`}
+              direction="neutral"
+            />
+            <Stat1
+              title="Fees & commissions"
+              value={`${gbp(m.feesMonthly * 12)}/yr`}
+              changeValue={`Incl. ${gbp(m.investFeesYear)} investment fees`}
+              direction={m.avoidableFees > 0 ? "down" : "neutral"}
+            />
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-5">
-            <Card className="lg:col-span-2">
+          <div className="grid gap-4 sm:gap-5 xl:grid-cols-7">
+            <Card className="xl:col-span-3">
               <CardHeader>
                 <CardTitle>Where the money goes</CardTitle>
                 <CardDescription>Monthly, by category</CardDescription>
               </CardHeader>
               <CardContent>
                 {spendBreakdown.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">Add expenses on the Cash flow tab to see this.</p>
+                  <p className="text-sm text-muted-foreground">Add expenses in Cash flow to see this.</p>
                 ) : (
                   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
                     <div className="h-48">
@@ -712,7 +826,7 @@ export default function Page() {
               </CardContent>
             </Card>
 
-            <Card className="lg:col-span-3">
+            <Card className="xl:col-span-4">
               <CardHeader className="flex flex-row items-start justify-between gap-2">
                 <div className="space-y-1.5">
                   <CardTitle>Net worth over time</CardTitle>
@@ -817,10 +931,12 @@ export default function Page() {
               </CardContent>
             </Card>
           </div>
-        </TabsContent>
+        </div>
+        )}
 
         {/* ============================ CASH FLOW ============================ */}
-        <TabsContent value="cashflow" className="space-y-4">
+        {section === "cashflow" && (
+        <div className="space-y-4 sm:space-y-5">
           <Card>
             <CardHeader>
               <CardTitle>Income</CardTitle>
@@ -866,7 +982,7 @@ export default function Page() {
           <Card>
             <CardHeader>
               <CardTitle>Expenses</CardTitle>
-              <CardDescription>Tick essential for anything you'd still have to pay if money got tight.</CardDescription>
+              <CardDescription>Tick essential for anything you&apos;d still have to pay if money got tight.</CardDescription>
             </CardHeader>
             <CardContent>
               <EditableTable<Expense>
@@ -890,7 +1006,7 @@ export default function Page() {
             <Card>
               <CardHeader>
                 <CardTitle>Subscriptions</CardTitle>
-                <CardDescription>Untick "Worth it" to flag something for cancelling.</CardDescription>
+                <CardDescription>Untick &quot;Worth it&quot; to flag something for cancelling.</CardDescription>
               </CardHeader>
               <CardContent>
                 <EditableTable<Subscription>
@@ -931,10 +1047,12 @@ export default function Page() {
               </CardContent>
             </Card>
           </div>
-        </TabsContent>
+        </div>
+        )}
 
         {/* ============================ BALANCES ============================ */}
-        <TabsContent value="balances" className="space-y-4">
+        {section === "balances" && (
+        <div className="space-y-4 sm:space-y-5">
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
             <Stat label="Cash and current" value={gbp(m.cashLike)} />
             <Stat label="Tax pot" value={gbp(m.taxPot)} />
@@ -1039,14 +1157,16 @@ export default function Page() {
               />
             </CardContent>
           </Card>
-        </TabsContent>
+        </div>
+        )}
 
         {/* ============================ GOALS ============================ */}
-        <TabsContent value="goals" className="space-y-4">
+        {section === "goals" && (
+        <div className="space-y-4 sm:space-y-5">
           <Card>
             <CardHeader>
               <CardTitle>Financial goals</CardTitle>
-              <CardDescription>The monthly figure is what you'd need to save to hit each goal on time.</CardDescription>
+              <CardDescription>The monthly figure is what you&apos;d need to save to hit each goal on time.</CardDescription>
             </CardHeader>
             <CardContent>
               <EditableTable<Goal>
@@ -1104,16 +1224,18 @@ export default function Page() {
               );
             })}
           </div>
-        </TabsContent>
+        </div>
+        )}
 
         {/* ============================ ROUTINE ============================ */}
-        <TabsContent value="routine" className="space-y-4">
+        {section === "routine" && (
+        <div className="space-y-4 sm:space-y-5">
           <div className="grid gap-4 lg:grid-cols-5">
             <Card className="lg:col-span-3">
               <CardHeader>
-                <CardTitle>This week's 15-minute check-in</CardTitle>
+                <CardTitle>This week&apos;s 15-minute check-in</CardTitle>
                 <CardDescription>
-                  Same time each week, timer on. When it's ticked off, you're done until next week. Completed{" "}
+                  Same time each week, timer on. When it&apos;s ticked off, you&apos;re done until next week. Completed{" "}
                   {weeksDone} of the last 8 weeks.
                 </CardDescription>
               </CardHeader>
@@ -1148,7 +1270,7 @@ export default function Page() {
                   })}
                 </ul>
                 <p className="text-sm text-muted-foreground">
-                  Outside this slot, don't open banking apps to check balances. Automate savings and bill payments so the
+                  Outside this slot, don&apos;t open banking apps to check balances. Automate savings and bill payments so the
                   weekly check is the only time you need to think about it.
                 </p>
               </CardContent>
@@ -1167,7 +1289,7 @@ export default function Page() {
                   <span className="font-medium">31 July:</span> second payment on account.
                 </p>
                 <p>
-                  <span className="font-medium">5 April:</span> tax year ends. Last chance to use this year's ISA allowance.
+                  <span className="font-medium">5 April:</span> tax year ends. Last chance to use this year&apos;s ISA allowance.
                 </p>
               </CardContent>
             </Card>
@@ -1190,12 +1312,19 @@ export default function Page() {
               </Card>
             ))}
           </div>
-        </TabsContent>
-      </Tabs>
+        </div>
+        )}
 
-      <footer className="pb-4 text-xs text-muted-foreground">
-        Everything is saved in this browser only. Use Export to back up or move to another device.
-      </footer>
-    </main>
+        {/* ============================ STATEMENTS ============================ */}
+        {section === "statements" && (
+          <MonzoImport
+            transactions={data.transactions}
+            rules={data.rules}
+            imports={data.imports}
+            derived={derived}
+            onChange={patchMonzo}
+          />
+        )}
+    </div>
   );
 }
