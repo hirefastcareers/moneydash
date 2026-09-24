@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { FileUp, Trash2 } from "lucide-react";
+import { FileSpreadsheet, FileUp, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import { formatPence } from "@/lib/monzo/common";
 import { normName, type Derived } from "@/lib/monzo/derive";
 import { parseMonzoCsv } from "@/lib/monzo/parse-csv";
 import { extractPdfPages, parseStatementPages } from "@/lib/monzo/parse-pdf";
+import { parseTrackerWorkbook, type TrackerConfig } from "@/lib/monzo/tracker";
 import type { AccountKind, ImportReport, ParseResult, Rule, Txn, TxnClass } from "@/lib/monzo/types";
 
 const CLASSES: { value: TxnClass; label: string }[] = [
@@ -23,11 +24,10 @@ const CLASSES: { value: TxnClass; label: string }[] = [
   { value: "expense", label: "Expense" },
   { value: "subscription", label: "Subscription" },
   { value: "fee", label: "Fee" },
+  { value: "debt", label: "Debt repayment" },
   { value: "transfer", label: "Own transfer" },
   { value: "ignore", label: "Ignore" },
 ];
-
-const CATEGORIES = ["Housing", "Bills", "Food", "Transport", "Insurance", "Personal", "Fun", "Business", "Other"];
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -39,22 +39,49 @@ const tooltipStyle = {
   fontSize: 12,
 };
 
+export type MonzoChange = {
+  transactions?: Txn[];
+  rules?: Rule[];
+  imports?: ImportReport[];
+  tracker?: TrackerConfig | null;
+};
+
 type Props = {
   transactions: Txn[];
   rules: Rule[];
   imports: ImportReport[];
+  tracker: TrackerConfig | null;
   derived: Derived;
-  onChange: (next: { transactions?: Txn[]; rules?: Rule[]; imports?: ImportReport[] }) => void;
+  /** Expense categories to offer in the payee table */
+  categories: string[];
+  onChange: (next: MonzoChange) => void;
 };
 
-export function MonzoImport({ transactions, rules, imports, derived, onChange }: Props) {
+export function MonzoImport({ transactions, rules, imports, tracker, derived, categories, onChange }: Props) {
   const [account, setAccount] = useState<AccountKind>("personal");
   const [busy, setBusy] = useState<string | null>(null);
   const [openReport, setOpenReport] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [txnLimit, setTxnLimit] = useState(100);
   const [payeeLimit, setPayeeLimit] = useState(40);
+  const [reviewOnly, setReviewOnly] = useState(false);
+  const [trackerError, setTrackerError] = useState<string | null>(null);
+  const [showSkipped, setShowSkipped] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const trackerRef = useRef<HTMLInputElement>(null);
+
+  /* ---------------------------- Budget tracker rules ---------------------------- */
+
+  async function importTracker(file: File) {
+    setTrackerError(null);
+    setBusy(`Learning rules from ${file.name}…`);
+    try {
+      onChange({ tracker: await parseTrackerWorkbook(await file.arrayBuffer(), file.name) });
+    } catch (err) {
+      setTrackerError(err instanceof Error ? err.message : String(err));
+    }
+    setBusy(null);
+  }
 
   /* ---------------------------- Import ---------------------------- */
 
@@ -150,12 +177,16 @@ export function MonzoImport({ transactions, rules, imports, derived, onChange }:
   /* ---------------------------- Views ---------------------------- */
 
   const payees = useMemo(() => {
-    const map = new Map<string, { name: string; account: AccountKind; count: number; total: number; cls: TxnClass; category: string }>();
+    const map = new Map<
+      string,
+      { name: string; account: AccountKind; count: number; total: number; cls: TxnClass; category: string; review: number }
+    >();
     derived.classified.forEach((t) => {
       const k = `${t.account}|${normName(t.name)}`;
-      const g = map.get(k) ?? { name: t.name, account: t.account, count: 0, total: 0, cls: t.cls, category: t.category };
+      const g = map.get(k) ?? { name: t.name, account: t.account, count: 0, total: 0, cls: t.cls, category: t.category, review: 0 };
       g.count++;
       g.total += t.amountPence;
+      if (t.review) g.review++;
       map.set(k, g);
     });
     return [...map.values()].sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
@@ -163,9 +194,15 @@ export function MonzoImport({ transactions, rules, imports, derived, onChange }:
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const rows = [...derived.classified].reverse();
+    const rows = [...derived.classified].reverse().filter((t) => !reviewOnly || t.review);
     return q ? rows.filter((t) => `${t.name} ${t.description} ${t.cls} ${t.category}`.toLowerCase().includes(q)) : rows;
-  }, [derived.classified, search]);
+  }, [derived.classified, search, reviewOnly]);
+
+  const reviewCount = derived.classified.filter((t) => t.review).length;
+
+  const budgetRows = (tracker?.categories ?? [])
+    .filter((c) => c.budget !== undefined)
+    .map((c) => ({ name: c.name, budget: c.budget!, actual: derived.categoryActuals[c.name] ?? 0 }));
 
   const coverage = (["personal", "business"] as AccountKind[]).map((a) => {
     const ts = transactions.filter((t) => t.account === a);
@@ -174,6 +211,97 @@ export function MonzoImport({ transactions, rules, imports, derived, onChange }:
 
   return (
     <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Budget tracker rules</CardTitle>
+          <CardDescription>
+            Upload your budget tracker workbook and every row of its Payment Log becomes a rule, using the exact category names.
+            Committed bills, debt repayments, budgets per category and the rent netting come from the workbook too.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            <Button variant={tracker ? "outline" : "default"} onClick={() => trackerRef.current?.click()} disabled={!!busy}>
+              <FileSpreadsheet className="size-4" /> {tracker ? "Update from a newer tracker" : "Import budget tracker (.xlsx)"}
+            </Button>
+            {tracker && (
+              <Button variant="ghost" onClick={() => onChange({ tracker: null })}>
+                Stop using these rules
+              </Button>
+            )}
+            <input
+              ref={trackerRef}
+              type="file"
+              accept=".xlsx,.xlsm,.xls"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) importTracker(f);
+                e.target.value = "";
+              }}
+            />
+          </div>
+          {trackerError && <p className="text-sm text-destructive">{trackerError}</p>}
+          {tracker && (
+            <div className="space-y-3 text-sm">
+              <p>
+                <span className="font-medium">{tracker.file}</span>: read {tracker.logRows} Payment Log rows, learned from{" "}
+                {tracker.learnedRows}, giving {Object.keys(tracker.merchants).length} description rules across{" "}
+                {tracker.categories.length} categories. {tracker.debts.length} debts added to the Balances tab.
+              </p>
+              {tracker.skipped.length > 0 && (
+                <div>
+                  <button className="text-left underline underline-offset-4" onClick={() => setShowSkipped((v) => !v)}>
+                    {tracker.skipped.length} rows couldn&apos;t be learned from
+                  </button>
+                  {showSkipped && (
+                    <ul className="mt-2 space-y-1 text-muted-foreground">
+                      {tracker.skipped.map((s) => (
+                        <li key={s.row}>
+                          Row {s.row}: {s.reason}. <span className="break-all">{s.raw}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              <p className="text-muted-foreground">
+                Committed: {tracker.categories.filter((c) => c.committed).map((c) => c.name).join(", ")}.
+              </p>
+              {budgetRows.length > 0 && transactions.length > 0 && (
+                <div className="overflow-x-auto rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Category</TableHead>
+                        <TableHead className="text-right">Budget / month</TableHead>
+                        <TableHead className="text-right">Actual / month</TableHead>
+                        <TableHead className="text-right">Difference</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {budgetRows.map((b) => {
+                        const over = b.actual - b.budget;
+                        return (
+                          <TableRow key={b.name}>
+                            <TableCell className="font-medium">{b.name}</TableCell>
+                            <TableCell className="text-right tabular-nums">{formatPence(b.budget * 100)}</TableCell>
+                            <TableCell className="text-right tabular-nums">{formatPence(b.actual * 100)}</TableCell>
+                            <TableCell className={`text-right tabular-nums ${over > 0 ? "text-destructive" : "text-emerald-600 dark:text-emerald-400"}`}>
+                              {over > 0 ? `${formatPence(over * 100)} over` : `${formatPence(-over * 100)} under`}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle>Import Monzo statements</CardTitle>
@@ -427,7 +555,14 @@ export function MonzoImport({ transactions, rules, imports, derived, onChange }:
                   <TableBody>
                     {payees.slice(0, payeeLimit).map((p) => (
                       <TableRow key={`${p.account}|${p.name}`}>
-                        <TableCell className="max-w-64 truncate font-medium">{p.name}</TableCell>
+                        <TableCell className="max-w-64 font-medium">
+                          <div className="truncate">{p.name}</div>
+                          {p.review > 0 && (
+                            <Badge variant="outline" className="mt-1">
+                              Check sorting
+                            </Badge>
+                          )}
+                        </TableCell>
                         <TableCell className="capitalize">{p.account}</TableCell>
                         <TableCell className="text-right tabular-nums">{p.count}</TableCell>
                         <TableCell className="text-right tabular-nums">{formatPence(p.total)}</TableCell>
@@ -452,7 +587,7 @@ export function MonzoImport({ transactions, rules, imports, derived, onChange }:
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
-                                {CATEGORIES.map((c) => (
+                                {categories.map((c) => (
                                   <SelectItem key={c} value={c}>
                                     {c}
                                   </SelectItem>
@@ -481,10 +616,17 @@ export function MonzoImport({ transactions, rules, imports, derived, onChange }:
               <CardTitle>All transactions</CardTitle>
               <CardDescription>
                 {transactions.length} imported. Newest first. The last column shows where each row came from in its file.
+                {reviewCount > 0 &&
+                  ` ${reviewCount} need a check: either no rule matched, or your tracker filed the same description under different categories.`}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <Input placeholder="Search payee, category or type" value={search} onChange={(e) => setSearch(e.target.value)} className="max-w-sm" />
+              <div className="flex flex-wrap gap-2">
+                <Input placeholder="Search payee, category or type" value={search} onChange={(e) => setSearch(e.target.value)} className="max-w-sm" />
+                <Button variant={reviewOnly ? "default" : "outline"} onClick={() => setReviewOnly((v) => !v)}>
+                  {reviewOnly ? "Showing rows to check" : `Rows to check (${reviewCount})`}
+                </Button>
+              </div>
               <div className="overflow-x-auto rounded-md border">
                 <Table>
                   <TableHeader>
@@ -510,8 +652,13 @@ export function MonzoImport({ transactions, rules, imports, derived, onChange }:
                         </TableCell>
                         <TableCell className="capitalize">{t.account}</TableCell>
                         <TableCell>
-                          {CLASSES.find((c) => c.value === t.cls)?.label}
-                          {t.cls === "expense" && <span className="text-muted-foreground"> ({t.category})</span>}
+                          <div>
+                            {CLASSES.find((c) => c.value === t.cls)?.label}
+                            {t.cls !== "transfer" && t.cls !== "ignore" && <span className="text-muted-foreground"> ({t.category})</span>}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            {t.review ? <span className="text-amber-600 dark:text-amber-400">Check: {t.matchedBy}</span> : t.matchedBy}
+                          </div>
                         </TableCell>
                         <TableCell className={`text-right tabular-nums ${t.amountPence > 0 ? "text-emerald-600 dark:text-emerald-400" : ""}`}>
                           {formatPence(t.amountPence)}

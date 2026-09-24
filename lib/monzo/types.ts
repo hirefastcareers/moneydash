@@ -1,6 +1,6 @@
 export type AccountKind = "personal" | "business";
 
-export type TxnClass = "income" | "expense" | "subscription" | "fee" | "transfer" | "ignore";
+export type TxnClass = "income" | "expense" | "subscription" | "fee" | "debt" | "transfer" | "ignore";
 
 export type Txn = {
   /** Monzo transaction ID for CSV rows, a stable hash for PDF rows */

@@ -38,12 +38,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { MonzoImport } from "@/components/monzo-import";
+import { MonzoImport, type MonzoChange } from "@/components/monzo-import";
 import { PageTitle } from "@/components/page-title";
 import { SECTION_LABELS, useSection } from "@/components/section-nav";
 import { Stat1 } from "@/components/stat-1";
 import { Stat2 } from "@/components/stat-2";
 import { DERIVED_PREFIX, deriveDashboard } from "@/lib/monzo/derive";
+import type { TrackerConfig } from "@/lib/monzo/tracker";
 import type { ImportReport, Rule, Txn } from "@/lib/monzo/types";
 
 /* ------------------------------------------------------------------ */
@@ -82,6 +83,8 @@ type Data = {
   rules: Rule[];
   /** One report per imported file */
   imports: ImportReport[];
+  /** Rules learned from the budget tracker workbook */
+  tracker: TrackerConfig | null;
 };
 
 const INCOME_KINDS = ["Employed (take-home)", "Self-employed (before tax)", "Other"];
@@ -202,6 +205,7 @@ function sampleData(): Data {
     transactions: [],
     rules: [],
     imports: [],
+    tracker: null,
   };
 }
 
@@ -222,6 +226,7 @@ function emptyData(): Data {
     transactions: [],
     rules: [],
     imports: [],
+    tracker: null,
   };
 }
 
@@ -248,7 +253,7 @@ function mergeDerived<T extends { id: string }>(existing: T[], derived: T[], kee
 }
 
 function applyDerived(d: Data): Data {
-  const der = deriveDashboard(d.transactions, d.rules);
+  const der = deriveDashboard(d.transactions, d.rules, d.tracker);
   return {
     ...d,
     income: mergeDerived<Income>(d.income, der.income, ["kind"]),
@@ -509,6 +514,7 @@ export default function Page() {
       next.transactions ??= [];
       next.rules ??= [];
       next.imports ??= [];
+      next.tracker ??= null;
     } catch {
       next = sampleData();
     }
@@ -534,11 +540,42 @@ export default function Page() {
 
   const patch = <K extends keyof Data>(key: K, value: Data[K]) => setData((d) => ({ ...d, [key]: value }));
 
-  // Statement changes rebuild the Monzo rows on every tab in one update
-  const patchMonzo = (next: Partial<Pick<Data, "transactions" | "rules" | "imports">>) =>
-    setData((d) => applyDerived({ ...d, ...next }));
+  // Statement or rule changes rebuild the Monzo rows on every tab in one update
+  const patchMonzo = (next: MonzoChange) =>
+    setData((d) => {
+      const merged: Data = { ...d, ...next };
+      if (next.tracker !== undefined) {
+        // Debts come from the tracker's Debt Tracker tab; rows you added yourself are kept
+        const manual = d.debts.filter((x) => !x.id.startsWith("tracker-debt-"));
+        const fromTracker: Debt[] = (next.tracker?.debts ?? []).map((td) => ({
+          id: `tracker-debt-${td.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+          name: td.lender && td.lender !== td.name ? `${td.name} (${td.lender})` : td.name,
+          balance: td.balance,
+          apr: td.apr,
+          minPayment: td.payment,
+        }));
+        merged.debts = [...manual, ...fromTracker];
+      }
+      return applyDerived(merged);
+    });
 
-  const derived = useMemo(() => deriveDashboard(data.transactions, data.rules), [data.transactions, data.rules]);
+  const derived = useMemo(
+    () => deriveDashboard(data.transactions, data.rules, data.tracker),
+    [data.transactions, data.rules, data.tracker]
+  );
+
+  // Dashboard categories plus the budget tracker's exact category names
+  const expenseCategories = useMemo(
+    () => [
+      ...new Set([
+        ...EXPENSE_CATEGORIES,
+        "Rent",
+        ...(data.tracker?.categories.filter((c) => ["expense", "subscription", "fee"].includes(c.role)).map((c) => c.name) ?? []),
+        ...data.expenses.map((e) => e.category),
+      ]),
+    ],
+    [data.tracker, data.expenses]
+  );
 
   /* ------------------------------ Numbers ------------------------------ */
 
@@ -992,7 +1029,7 @@ export default function Page() {
                 blank={() => ({ id: uid(), name: "", category: "Other", amount: 0, frequency: "monthly", essential: false })}
                 cols={[
                   { key: "name", label: "Name", kind: "text" },
-                  { key: "category", label: "Category", kind: "select", options: EXPENSE_CATEGORIES },
+                  { key: "category", label: "Category", kind: "select", options: expenseCategories },
                   { key: "amount", label: "Amount", kind: "number" },
                   { key: "frequency", label: "How often", kind: "select", options: FREQS },
                   { key: "essential", label: "Essential", kind: "bool" },
@@ -1321,7 +1358,9 @@ export default function Page() {
             transactions={data.transactions}
             rules={data.rules}
             imports={data.imports}
+            tracker={data.tracker}
             derived={derived}
+            categories={expenseCategories}
             onChange={patchMonzo}
           />
         )}
