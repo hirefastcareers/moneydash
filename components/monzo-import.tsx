@@ -211,7 +211,7 @@ export function MonzoImport({ transactions, rules, imports, tracker, derived, ca
 
   return (
     <div className="space-y-4">
-      <Card>
+      <Card className="fx-rise" style={{ ["--i" as string]: 0 }}>
         <CardHeader>
           <CardTitle>Budget tracker rules</CardTitle>
           <CardDescription>
@@ -302,7 +302,7 @@ export function MonzoImport({ transactions, rules, imports, tracker, derived, ca
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className="fx-rise" style={{ ["--i" as string]: 1 }}>
         <CardHeader>
           <CardTitle>Import Monzo statements</CardTitle>
           <CardDescription>
@@ -357,7 +357,7 @@ export function MonzoImport({ transactions, rules, imports, tracker, derived, ca
       </Card>
 
       {imports.length > 0 && (
-        <Card>
+        <Card className="fx-rise" style={{ ["--i" as string]: 2 }}>
           <CardHeader className="flex flex-row items-start justify-between gap-2">
             <div className="space-y-1.5">
               <CardTitle>Import checks</CardTitle>
@@ -482,7 +482,7 @@ export function MonzoImport({ transactions, rules, imports, tracker, derived, ca
       {transactions.length > 0 && (
         <>
           <div className="grid gap-4 lg:grid-cols-3">
-            <Card>
+            <Card className="fx-rise" style={{ ["--i" as string]: 3 }}>
               <CardHeader>
                 <CardTitle>Coverage</CardTitle>
                 <CardDescription>Dashboard figures are monthly averages over these months.</CardDescription>
@@ -508,7 +508,7 @@ export function MonzoImport({ transactions, rules, imports, tracker, derived, ca
               </CardContent>
             </Card>
 
-            <Card className="lg:col-span-2">
+            <Card className="fx-rise lg:col-span-2" style={{ ["--i" as string]: 4 }}>
               <CardHeader>
                 <CardTitle>Actual money in and out</CardTitle>
                 <CardDescription>By month, excluding transfers between your own accounts and pots</CardDescription>
@@ -531,7 +531,7 @@ export function MonzoImport({ transactions, rules, imports, tracker, derived, ca
             </Card>
           </div>
 
-          <Card>
+          <Card className="fx-rise" style={{ ["--i" as string]: 5 }}>
             <CardHeader>
               <CardTitle>Payees</CardTitle>
               <CardDescription>
@@ -611,7 +611,7 @@ export function MonzoImport({ transactions, rules, imports, tracker, derived, ca
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="fx-rise" style={{ ["--i" as string]: 6 }}>
             <CardHeader>
               <CardTitle>All transactions</CardTitle>
               <CardDescription>

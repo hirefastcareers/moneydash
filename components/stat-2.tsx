@@ -1,3 +1,4 @@
+import type { CSSProperties, ReactNode } from "react";
 import { MinusIcon, TrendingDownIcon, TrendingUpIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -7,14 +8,17 @@ import { Card, CardAction, CardDescription, CardFooter, CardHeader, CardTitle } 
 
 export type Stat2Props = {
     title: string;
-    value: string | number;
+    value: ReactNode;
     trendValue: number;
     footerLabel: string;
     footerSubtext: string;
     trendLabel?: string;
+    aside?: ReactNode;
+    className?: string;
+    style?: CSSProperties;
 };
 
-export const Stat2 = ({ title, value, trendValue, footerLabel, footerSubtext, trendLabel }: Stat2Props) => {
+export const Stat2 = ({ title, value, trendValue, footerLabel, footerSubtext, trendLabel, aside, className, style }: Stat2Props) => {
     const isPositive = trendValue > 0;
     const isNeutral = trendValue === 0;
 
@@ -29,12 +33,15 @@ export const Stat2 = ({ title, value, trendValue, footerLabel, footerSubtext, tr
     const formattedTrend = trendLabel ?? (isNeutral ? "0%" : `${isPositive ? "+" : ""}${trendValue}%`);
 
     return (
-        <Card className="@container/card max-sm:py-4">
+        <Card className={cn("@container/card max-sm:py-4", className)} style={style}>
             <CardHeader>
                 <CardDescription className="font-medium">{title}</CardDescription>
-                <CardTitle className="text-2xl font-semibold @[600px]/card:text-4xl @[800px]/card:text-5xl">
-                    {value}
-                </CardTitle>
+                <div className="flex items-center justify-between gap-2">
+                    <CardTitle className="text-2xl font-semibold @[600px]/card:text-4xl @[800px]/card:text-5xl">
+                        {value}
+                    </CardTitle>
+                    {aside}
+                </div>
                 <CardAction>
                     <Badge variant="outline" className={cn("gap-1 px-1.5 py-0.5", trendClass)}>
                         <Icon className="size-3" />

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Area,
   AreaChart,
@@ -38,12 +38,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { AnimatedNumber } from "@/components/fx/animated-number";
+import { CashflowRiver, riverFromDashboard } from "@/components/fx/cashflow-river";
+import { DebtFreePath } from "@/components/fx/debt-free-path";
+import { GoalJar } from "@/components/fx/goal-jar";
+import { SavingsGauge } from "@/components/fx/savings-gauge";
 import { MonzoImport, type MonzoChange } from "@/components/monzo-import";
 import { PageTitle } from "@/components/page-title";
 import { SECTION_LABELS, useSection } from "@/components/section-nav";
 import { Stat1 } from "@/components/stat-1";
 import { Stat2 } from "@/components/stat-2";
 import { DERIVED_PREFIX, deriveDashboard } from "@/lib/monzo/derive";
+import { isBusinessCost, selfEmployedTax } from "@/lib/tax";
 import type { TrackerConfig } from "@/lib/monzo/tracker";
 import type { ImportReport, Rule, Txn } from "@/lib/monzo/types";
 
@@ -463,9 +469,25 @@ function EditableTable<T extends { id: string }>({
 /* Small presentational pieces                                         */
 /* ------------------------------------------------------------------ */
 
-function Stat({ label, value, hint, tone }: { label: string; value: string; hint?: string; tone?: "good" | "bad" }) {
+const rise = (i: number): CSSProperties => ({ ["--i" as string]: i });
+
+function Stat({
+  label,
+  value,
+  hint,
+  tone,
+  className,
+  style,
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: string;
+  tone?: "good" | "bad";
+  className?: string;
+  style?: CSSProperties;
+}) {
   return (
-    <Card className="gap-1 py-4">
+    <Card className={`gap-1 py-4 ${className ?? ""}`} style={style}>
       <CardHeader className="px-4">
         <CardDescription>{label}</CardDescription>
       </CardHeader>
@@ -580,10 +602,22 @@ export default function Page() {
   /* ------------------------------ Numbers ------------------------------ */
 
   const m = useMemo(() => {
-    const rate = data.settings.taxRate / 100;
     const seGross = sum(data.income.filter((i) => i.kind.startsWith("Self")).map((i) => toMonthly(i.amount, i.frequency)));
     const otherIncome = sum(data.income.filter((i) => !i.kind.startsWith("Self")).map((i) => toMonthly(i.amount, i.frequency)));
-    const taxSetAside = seGross * rate;
+    const businessCostsMonthly =
+      sum(
+        data.expenses
+          .filter((e) => isBusinessCost({ name: e.name, category: e.category }))
+          .map((e) => toMonthly(e.amount, e.frequency))
+      ) +
+      sum(data.subscriptions.filter((s) => isBusinessCost({ name: s.name })).map((s) => toMonthly(s.amount, s.frequency))) +
+      sum(data.fees.filter((f) => isBusinessCost({ name: f.name })).map((f) => toMonthly(f.amount, f.frequency)));
+    const { profit, setAside } = selfEmployedTax({
+      seGrossMonthly: seGross,
+      businessCostsMonthly,
+      ratePct: data.settings.taxRate,
+    });
+    const taxSetAside = setAside;
     const incomeNet = otherIncome + seGross - taxSetAside;
 
     const expenses = sum(data.expenses.map((e) => toMonthly(e.amount, e.frequency)));
@@ -614,7 +648,7 @@ export default function Page() {
     const debtToIncome = incomeNet > 0 ? (debtMin / incomeNet) * 100 : 0;
 
     return {
-      seGross, otherIncome, taxSetAside, incomeNet, expenses, essential, subs, subsNotWorth,
+      seGross, otherIncome, profit, taxSetAside, incomeNet, expenses, essential, subs, subsNotWorth,
       investFeesYear, feesMonthly, avoidableFees, debtMin, outgoings, leftOver, savingsRate,
       cashLike, easyAccess, taxPot, assets, debts, netWorth, investTotal, investContrib,
       emergencyMonths, debtToIncome,
@@ -765,32 +799,45 @@ export default function Page() {
           </p>
           <div className="grid gap-4 sm:gap-5 xl:grid-cols-4">
             <Stat2
+              className="fx-rise"
+              style={rise(0)}
               title="Net worth"
-              value={gbp(m.netWorth)}
+              value={<AnimatedNumber value={m.netWorth} format={gbp} />}
               trendValue={m.netWorth < 0 ? -1 : 1}
               trendLabel={m.netWorth < 0 ? "Negative" : "Positive"}
               footerLabel={`${gbp(m.assets)} in assets`}
               footerSubtext={`${gbp(m.debts)} in debts`}
             />
             <Stat2
+              className="fx-rise"
+              style={rise(1)}
               title="Income / month"
-              value={gbp(m.incomeNet)}
+              value={<AnimatedNumber value={m.incomeNet} format={gbp} />}
               trendValue={m.incomeNet > 0 ? 1 : 0}
               trendLabel={m.seGross ? "After tax" : "Take-home"}
-              footerLabel={m.seGross ? `${gbp(m.taxSetAside)} set aside` : "No self-employed income"}
+              footerLabel={
+                m.seGross
+                  ? `${gbp(m.taxSetAside)} set aside · ${data.settings.taxRate}% of ${gbp(m.profit)} profit`
+                  : "No self-employed income"
+              }
               footerSubtext="Employed pay is entered as take-home"
             />
             <Stat2
+              className="fx-rise"
+              style={rise(2)}
               title="Outgoings / month"
-              value={gbp(m.outgoings)}
+              value={<AnimatedNumber value={m.outgoings} format={gbp} />}
               trendValue={m.leftOver < 0 ? -1 : 1}
               trendLabel={m.leftOver < 0 ? "Over budget" : "Covered"}
               footerLabel={`${gbp(m.essential)} essential`}
               footerSubtext="Bills, subscriptions, fees and debt payments"
             />
             <Stat2
+              className="fx-rise"
+              style={rise(3)}
               title="Savings rate"
-              value={pct(m.savingsRate)}
+              value={<AnimatedNumber value={m.savingsRate} format={pct} />}
+              aside={<SavingsGauge value={m.savingsRate} className="h-16 w-28" />}
               trendValue={m.savingsRate < 0 ? -1 : m.savingsRate >= 20 ? 1 : 0}
               trendLabel={m.savingsRate < 0 ? "Shortfall" : m.savingsRate >= 20 ? "Strong" : "Building"}
               footerLabel={`${gbp(m.leftOver)} left over`}
@@ -799,33 +846,74 @@ export default function Page() {
           </div>
           <div className="grid gap-4 sm:gap-5 md:grid-cols-2 xl:grid-cols-4">
             <Stat1
+              className="fx-rise"
+              style={rise(4)}
               title="Total debt"
-              value={gbp(m.debts)}
+              value={<AnimatedNumber value={m.debts} format={gbp} />}
               changeValue={`${gbp(m.debtMin)}/mo minimums`}
               direction={m.debts > 0 ? "down" : "neutral"}
             />
             <Stat1
+              className="fx-rise"
+              style={rise(5)}
               title="Investments"
-              value={gbp(m.investTotal)}
+              value={<AnimatedNumber value={m.investTotal} format={gbp} />}
               changeValue={`${gbp(m.investTotal - m.investContrib)} growth`}
               direction={m.investTotal - m.investContrib < 0 ? "down" : "up"}
             />
             <Stat1
+              className="fx-rise"
+              style={rise(6)}
               title="Subscriptions"
-              value={`${gbp(m.subs)}/mo`}
+              value={<AnimatedNumber value={m.subs} format={(n) => `${gbp(n)}/mo`} />}
               changeValue={`${gbp(m.subs * 12)} a year`}
               direction="neutral"
             />
             <Stat1
+              className="fx-rise"
+              style={rise(7)}
               title="Fees & commissions"
-              value={`${gbp(m.feesMonthly * 12)}/yr`}
+              value={<AnimatedNumber value={m.feesMonthly * 12} format={(n) => `${gbp(n)}/yr`} />}
               changeValue={`Incl. ${gbp(m.investFeesYear)} investment fees`}
               direction={m.avoidableFees > 0 ? "down" : "neutral"}
             />
           </div>
 
+          <Card className="fx-rise" style={rise(8)}>
+            <CardHeader>
+              <CardTitle>Your month</CardTitle>
+              <CardDescription>Where each pound comes from and goes. Hover a stream to focus it.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <CashflowRiver
+                {...riverFromDashboard({
+                  income: data.income,
+                  expenses: data.expenses,
+                  subscriptions: data.subscriptions,
+                  fees: data.fees,
+                  debtPayments: m.debtMin,
+                  taxSetAside: m.taxSetAside,
+                  investmentFeesMonthly: m.investFeesYear / 12,
+                })}
+                format={gbp}
+              />
+            </CardContent>
+          </Card>
+
+          <Card className="fx-rise" style={rise(9)}>
+            <CardHeader>
+              <CardTitle>Your way out of debt</CardTitle>
+              <CardDescription>
+                Minimum payments on everything, with anything spare going to the highest interest rate first.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <DebtFreePath debts={data.debts} format={gbp} />
+            </CardContent>
+          </Card>
+
           <div className="grid gap-4 sm:gap-5 xl:grid-cols-7">
-            <Card className="xl:col-span-3">
+            <Card className="fx-rise xl:col-span-3" style={rise(10)}>
               <CardHeader>
                 <CardTitle>Where the money goes</CardTitle>
                 <CardDescription>Monthly, by category</CardDescription>
@@ -863,7 +951,7 @@ export default function Page() {
               </CardContent>
             </Card>
 
-            <Card className="xl:col-span-4">
+            <Card className="fx-rise xl:col-span-4" style={rise(11)}>
               <CardHeader className="flex flex-row items-start justify-between gap-2">
                 <div className="space-y-1.5">
                   <CardTitle>Net worth over time</CardTitle>
@@ -898,7 +986,7 @@ export default function Page() {
           </div>
 
           <div className="grid gap-4 lg:grid-cols-3">
-            <Card>
+            <Card className="fx-rise" style={rise(12)}>
               <CardHeader>
                 <CardTitle>Needs attention</CardTitle>
               </CardHeader>
@@ -916,7 +1004,7 @@ export default function Page() {
               </CardContent>
             </Card>
 
-            <Card>
+            <Card className="fx-rise" style={rise(13)}>
               <CardHeader>
                 <CardTitle>Renewing in 14 days</CardTitle>
               </CardHeader>
@@ -945,26 +1033,26 @@ export default function Page() {
               </CardContent>
             </Card>
 
-            <Card>
+            <Card className="fx-rise" style={rise(14)}>
               <CardHeader>
                 <CardTitle>Goals</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-4">
+              <CardContent>
                 {data.goals.length === 0 && <p className="text-sm text-muted-foreground">Add a goal on the Goals tab.</p>}
-                {data.goals.map((g) => {
-                  const p = g.target > 0 ? Math.min(100, (g.saved / g.target) * 100) : 0;
-                  return (
-                    <div key={g.id} className="space-y-1.5">
-                      <div className="flex justify-between text-sm">
-                        <span>{g.name}</span>
-                        <span className="tabular-nums text-muted-foreground">
+                <div className="flex flex-wrap items-end gap-4">
+                  {data.goals.map((g, i) => {
+                    const p = g.target > 0 ? Math.min(100, (g.saved / g.target) * 100) : 0;
+                    return (
+                      <div key={g.id} className="flex flex-col items-center gap-1">
+                        <GoalJar pct={p} color={CHART_COLORS[i % CHART_COLORS.length]} />
+                        <span className="max-w-24 text-center text-sm">{g.name}</span>
+                        <span className="text-xs tabular-nums text-muted-foreground">
                           {gbp(g.saved)} / {gbp(g.target)}
                         </span>
                       </div>
-                      <Progress value={p} />
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
               </CardContent>
             </Card>
           </div>
@@ -974,7 +1062,7 @@ export default function Page() {
         {/* ============================ CASH FLOW ============================ */}
         {section === "cashflow" && (
         <div className="space-y-4 sm:space-y-5">
-          <Card>
+          <Card className="fx-rise" style={rise(0)}>
             <CardHeader>
               <CardTitle>Income</CardTitle>
               <CardDescription>
@@ -1009,14 +1097,13 @@ export default function Page() {
                   />
                 </div>
                 <p className="max-w-prose text-sm text-muted-foreground">
-                  25% is a common rule of thumb to cover income tax and National Insurance on profits. Your real figure
-                  depends on your other income and allowable expenses.
+                  Set aside from self-employed profit (income minus business costs). 25% is a rough rule of thumb, not a tax calculation.
                 </p>
               </div>
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="fx-rise" style={rise(1)}>
             <CardHeader>
               <CardTitle>Expenses</CardTitle>
               <CardDescription>Tick essential for anything you&apos;d still have to pay if money got tight.</CardDescription>
@@ -1040,7 +1127,7 @@ export default function Page() {
           </Card>
 
           <div className="grid gap-4 xl:grid-cols-2">
-            <Card>
+            <Card className="fx-rise" style={rise(2)}>
               <CardHeader>
                 <CardTitle>Subscriptions</CardTitle>
                 <CardDescription>Untick &quot;Worth it&quot; to flag something for cancelling.</CardDescription>
@@ -1062,7 +1149,7 @@ export default function Page() {
               </CardContent>
             </Card>
 
-            <Card>
+            <Card className="fx-rise" style={rise(3)}>
               <CardHeader>
                 <CardTitle>Fees and commissions</CardTitle>
                 <CardDescription>Bank, card, platform and late-payment charges. Investment fees are added automatically.</CardDescription>
@@ -1091,13 +1178,13 @@ export default function Page() {
         {section === "balances" && (
         <div className="space-y-4 sm:space-y-5">
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <Stat label="Cash and current" value={gbp(m.cashLike)} />
-            <Stat label="Tax pot" value={gbp(m.taxPot)} />
-            <Stat label="Investments" value={gbp(m.investTotal)} />
-            <Stat label="Debts" value={gbp(m.debts)} tone={m.debts > 0 ? "bad" : undefined} />
+            <Stat className="fx-rise" style={rise(0)} label="Cash and current" value={<AnimatedNumber value={m.cashLike} format={gbp} />} />
+            <Stat className="fx-rise" style={rise(1)} label="Tax pot" value={<AnimatedNumber value={m.taxPot} format={gbp} />} />
+            <Stat className="fx-rise" style={rise(2)} label="Investments" value={<AnimatedNumber value={m.investTotal} format={gbp} />} />
+            <Stat className="fx-rise" style={rise(3)} label="Debts" value={<AnimatedNumber value={m.debts} format={gbp} />} tone={m.debts > 0 ? "bad" : undefined} />
           </div>
 
-          <Card>
+          <Card className="fx-rise" style={rise(4)}>
             <CardHeader>
               <CardTitle>Accounts</CardTitle>
               <CardDescription>Use the Tax pot type for money saved towards your self-assessment bill.</CardDescription>
@@ -1117,7 +1204,7 @@ export default function Page() {
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="fx-rise" style={rise(5)}>
             <CardHeader>
               <CardTitle>Investments</CardTitle>
               <CardDescription>Fee % is the yearly platform plus fund charge.</CardDescription>
@@ -1150,7 +1237,19 @@ export default function Page() {
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="fx-rise" style={rise(6)}>
+            <CardHeader>
+              <CardTitle>Your way out of debt</CardTitle>
+              <CardDescription>
+                Minimum payments on everything, with anything spare going to the highest interest rate first.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <DebtFreePath debts={data.debts} format={gbp} />
+            </CardContent>
+          </Card>
+
+          <Card className="fx-rise" style={rise(7)}>
             <CardHeader>
               <CardTitle>Debts</CardTitle>
               <CardDescription>
@@ -1200,7 +1299,7 @@ export default function Page() {
         {/* ============================ GOALS ============================ */}
         {section === "goals" && (
         <div className="space-y-4 sm:space-y-5">
-          <Card>
+          <Card className="fx-rise" style={rise(0)}>
             <CardHeader>
               <CardTitle>Financial goals</CardTitle>
               <CardDescription>The monthly figure is what you&apos;d need to save to hit each goal on time.</CardDescription>
@@ -1233,13 +1332,13 @@ export default function Page() {
           </Card>
 
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {data.goals.map((g) => {
+            {data.goals.map((g, i) => {
               const p = g.target > 0 ? Math.min(100, (g.saved / g.target) * 100) : 0;
               const months = g.deadline ? daysUntil(g.deadline) / 30.44 : 0;
               const needed = months > 0 ? (g.target - g.saved) / Math.max(months, 1) : 0;
               const affordable = needed <= 0 || needed <= Math.max(m.leftOver, 0);
               return (
-                <Card key={g.id}>
+                <Card key={g.id} className="fx-rise" style={rise(i + 1)}>
                   <CardHeader>
                     <CardTitle>{g.name || "Untitled goal"}</CardTitle>
                     <CardDescription>
@@ -1248,7 +1347,7 @@ export default function Page() {
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <div className="text-2xl font-semibold tabular-nums">{pct(p)}</div>
-                    <Progress value={p} />
+                    <GoalJar pct={p} color={CHART_COLORS[i % CHART_COLORS.length]} />
                     <p className="text-sm text-muted-foreground">
                       {gbp(g.saved)} of {gbp(g.target)}.{" "}
                       {needed > 0 &&
@@ -1268,7 +1367,7 @@ export default function Page() {
         {section === "routine" && (
         <div className="space-y-4 sm:space-y-5">
           <div className="grid gap-4 lg:grid-cols-5">
-            <Card className="lg:col-span-3">
+            <Card className="fx-rise lg:col-span-3" style={rise(0)}>
               <CardHeader>
                 <CardTitle>This week&apos;s 15-minute check-in</CardTitle>
                 <CardDescription>
@@ -1313,7 +1412,7 @@ export default function Page() {
               </CardContent>
             </Card>
 
-            <Card className="lg:col-span-2">
+            <Card className="fx-rise lg:col-span-2" style={rise(1)}>
               <CardHeader>
                 <CardTitle>Key dates</CardTitle>
               </CardHeader>
@@ -1333,8 +1432,8 @@ export default function Page() {
           </div>
 
           <div className="grid gap-4 md:grid-cols-3">
-            {CADENCE.map((c) => (
-              <Card key={c.period}>
+            {CADENCE.map((c, i) => (
+              <Card key={c.period} className="fx-rise" style={rise(i + 2)}>
                 <CardHeader>
                   <CardTitle>{c.period}</CardTitle>
                   <CardDescription>{c.why}</CardDescription>

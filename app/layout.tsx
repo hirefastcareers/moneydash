@@ -8,6 +8,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 import "./globals.css";
+import "./fx.css";
 
 const dmSans = DM_Sans({
   subsets: ["latin"],
